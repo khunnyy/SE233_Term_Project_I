@@ -249,8 +249,12 @@ public class MainWindow {
         Label label = new Label(title);
         label.setStyle("-fx-font-size: 10px; -fx-font-weight: bold; -fx-text-fill: #6e7890;"
                 + "-fx-letter-spacing: 1px;");
-        StackPane frame = new StackPane(view);
-        frame.setAlignment(Pos.CENTER);
+        ScrollPane preview = new ScrollPane(view);
+        preview.setFitToWidth(false);
+        preview.setFitToHeight(false);
+        preview.setPannable(true);
+        preview.setStyle("-fx-background-color: transparent; -fx-background: transparent;");
+        StackPane frame = new StackPane(preview);
         frame.setMinHeight(300);
         frame.setStyle("-fx-background-color: white; -fx-border-color: #e6e9f1;"
                 + "-fx-border-radius: 14; -fx-background-radius: 14;");
@@ -367,7 +371,8 @@ public class MainWindow {
         double height = 390 * zoom;
         originalView.setFitWidth(width);
         originalView.setFitHeight(height);
-        resultView.setZoom(zoom);
+        resultView.setMinSize(width, height);
+        resultView.setPrefSize(width, height);
     }
 
     private void updateResultPreview() {
