@@ -1,6 +1,5 @@
-package se233.project;
+package se233.project.view;
 
-import javafx.application.Platform;
 import javafx.concurrent.Task;
 import javafx.geometry.Insets;
 import javafx.geometry.Pos;
@@ -9,27 +8,22 @@ import javafx.scene.Scene;
 import javafx.scene.control.*;
 import javafx.scene.image.Image;
 import javafx.scene.image.ImageView;
-import javafx.scene.web.WebView;
 import javafx.scene.input.Dragboard;
 import javafx.scene.input.TransferMode;
 import javafx.scene.layout.*;
+import javafx.scene.web.WebView;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
+import se233.project.model.SvgSettings;
 
-import java.io.*;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.util.*;
-import java.util.concurrent.*;
-
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipInputStream;
+import java.io.File;
+import java.util.List;
+import java.util.function.Consumer;
+import java.util.function.IntConsumer;
 
 public class MainWindow {
     private final Stage stage;
-    private final List<ImageItem> items = new ArrayList<>();
-    private int currentIndex = 0;
     private double zoom = 1.0;
 
     private final ImageView originalView = new ImageView();
@@ -49,11 +43,27 @@ public class MainWindow {
     private VBox dropPane;
     private HBox editorPane;
 
+    private Runnable onChooseFiles;
+    private Consumer<List<File>> onFilesDropped;
+    private IntConsumer onNavigate;
+    private Runnable onExport;
+    private Runnable onSettingsChanged;
+
     public MainWindow(Stage stage) {
         this.stage = stage;
         buildUI();
         setDropHandlers(root);
         showDropScreen();
+    }
+
+    public void setOnChooseFiles(Runnable handler) { this.onChooseFiles = handler; }
+    public void setOnFilesDropped(Consumer<List<File>> handler) { this.onFilesDropped = handler; }
+    public void setOnNavigate(IntConsumer handler) { this.onNavigate = handler; }
+    public void setOnExport(Runnable handler) { this.onExport = handler; }
+    public void setOnSettingsChanged(Runnable handler) { this.onSettingsChanged = handler; }
+
+    private void fireSettingsChanged() {
+        if (onSettingsChanged != null) onSettingsChanged.run();
     }
 
     public void show() {
@@ -62,6 +72,101 @@ public class MainWindow {
         stage.setMinHeight(640);
         stage.setScene(new Scene(root, 1240, 800));
         stage.show();
+    }
+
+    public void showDropScreen() {
+        root.setCenter(dropPane);
+    }
+
+    public void showEditorScreen() {
+        root.setCenter(editorPane);
+        editorPane.setVisible(true);
+        updatePreviewSizes();
+    }
+
+    public SvgSettings getSettings() {
+        int detail = switch (detailBox.getValue()) { case "Low" -> 0; case "High" -> 2; default -> 1; };
+        boolean unlimited = "Unlimited".equals(colorModeBox.getValue());
+        int colors = colorCountBox.getValue() == null ? 2 : colorCountBox.getValue();
+        return new SvgSettings(detail, colors, unlimited, removeBackground.isSelected());
+    }
+
+    public String getSettingsSummary() {
+        String colors = "Unlimited".equals(colorModeBox.getValue())
+                ? "Unlimited colors" : colorCountBox.getValue() + " colors";
+        return detailBox.getValue() + " detail • " + colors
+                + (removeBackground.isSelected() ? " • background removal on" : "");
+    }
+
+    public void setOriginalImage(Image image) { originalView.setImage(image); }
+
+    public void setFileLabel(String text) { fileLabel.setText(text); }
+
+    public void setResultSvg(String svg) { resultView.getEngine().loadContent(svg, "image/svg+xml"); }
+
+    public void clearResult() { resultView.getEngine().loadContent(""); }
+
+    public void setStatus(String text) {
+        if (statusLabel.textProperty().isBound()) return;
+        statusLabel.setText(text);
+    }
+
+    public void resetZoom() {
+        zoom = 1;
+        updatePreviewSizes();
+    }
+
+    public void setNavigationState(int itemCount) {
+        boolean multiple = itemCount >= 2;
+        backButton.setDisable(!multiple);
+        nextButton.setDisable(!multiple);
+        exportButton.setDisable(itemCount == 0);
+    }
+
+    public void setExporting(boolean exporting) {
+        progressBar.setVisible(exporting);
+        exportButton.setDisable(exporting);
+        if (exporting) progressBar.setProgress(0);
+    }
+
+    public void bindProgress(Task<?> task) {
+        progressBar.progressProperty().bind(task.progressProperty());
+        statusLabel.textProperty().bind(task.messageProperty());
+    }
+
+    public void unbindProgress() {
+        progressBar.progressProperty().unbind();
+        statusLabel.textProperty().unbind();
+    }
+
+    public List<File> askForFiles() {
+        FileChooser chooser = new FileChooser();
+        chooser.setTitle("Select images or ZIP archives");
+        chooser.getExtensionFilters().add(
+                new FileChooser.ExtensionFilter("Images and ZIP", "*.jpg", "*.jpeg", "*.png", "*.zip"));
+        return chooser.showOpenMultipleDialog(stage);
+    }
+
+    public File askForOutputFolder() {
+        DirectoryChooser chooser = new DirectoryChooser();
+        chooser.setTitle("Choose output folder for SVG files");
+        return chooser.showDialog(stage);
+    }
+
+    public void showAlert(String message) {
+        Alert alert = new Alert(Alert.AlertType.INFORMATION, message, ButtonType.OK);
+        alert.initOwner(stage);
+        alert.setHeaderText(null);
+        alert.showAndWait();
+    }
+
+    public void showError(String title, Throwable ex) {
+        String message = ex == null ? "Unknown error" : ex.getMessage();
+        Alert alert = new Alert(Alert.AlertType.ERROR, message == null ? "Unknown error" : message, ButtonType.OK);
+        alert.initOwner(stage);
+        alert.setTitle(title);
+        alert.setHeaderText(title);
+        alert.showAndWait();
     }
 
     private void buildUI() {
@@ -118,14 +223,13 @@ public class MainWindow {
         browse.setStyle("-fx-background-color: linear-gradient(to right, #626fe8, #795bdc);"
                 + "-fx-text-fill: white; -fx-font-size: 13px; -fx-font-weight: bold;"
                 + "-fx-background-radius: 11; -fx-padding: 12 24;");
-        browse.setOnAction(e -> chooseFiles());
+        browse.setOnAction(e -> { if (onChooseFiles != null) onChooseFiles.run(); });
         HBox formatChips = new HBox(8, formatChip("JPG"), formatChip("PNG"), formatChip("ZIP ARCHIVE"));
         formatChips.setAlignment(Pos.CENTER);
         Label dropHint = new Label("Up to multiple images at once");
         dropHint.setStyle("-fx-font-size: 11px; -fx-text-fill: #9aa2b2;");
         dropPane.getChildren().addAll(uploadIcon, dropEyebrow, dropTitle, dropText, browse, formatChips, dropHint);
         BorderPane.setMargin(dropPane, new Insets(36, 40, 40, 40));
-        root.setCenter(dropPane);
 
         originalView.setPreserveRatio(true);
         originalView.setSmooth(false);
@@ -170,11 +274,11 @@ public class MainWindow {
         colorModeBox.valueProperty().addListener((obs, old, val) -> {
             boolean custom = "Custom".equals(val);
             colorCountBox.setDisable(!custom);
-            updateResultPreview();
+            fireSettingsChanged();
         });
-        detailBox.valueProperty().addListener((obs, old, val) -> updateResultPreview());
-        colorCountBox.valueProperty().addListener((obs, old, val) -> updateResultPreview());
-        removeBackground.selectedProperty().addListener((obs, old, val) -> updateResultPreview());
+        detailBox.valueProperty().addListener((obs, old, val) -> fireSettingsChanged());
+        colorCountBox.valueProperty().addListener((obs, old, val) -> fireSettingsChanged());
+        removeBackground.selectedProperty().addListener((obs, old, val) -> fireSettingsChanged());
 
         VBox settings = new VBox(12);
         settings.setPadding(new Insets(18));
@@ -210,9 +314,9 @@ public class MainWindow {
         exportButton.setStyle("-fx-background-color: linear-gradient(to right, #626fe8, #795bdc);"
                 + "-fx-text-fill: white; -fx-font-weight: bold; -fx-font-size: 12px;"
                 + "-fx-background-radius: 9; -fx-padding: 11 12;");
-        backButton.setOnAction(e -> navigate(-1));
-        nextButton.setOnAction(e -> navigate(1));
-        exportButton.setOnAction(e -> exportAll());
+        backButton.setOnAction(e -> { if (onNavigate != null) onNavigate.accept(-1); });
+        nextButton.setOnAction(e -> { if (onNavigate != null) onNavigate.accept(1); });
+        exportButton.setOnAction(e -> { if (onExport != null) onExport.run(); });
         HBox nav = new HBox(8, backButton, nextButton);
         HBox.setHgrow(backButton, Priority.ALWAYS);
         HBox.setHgrow(nextButton, Priority.ALWAYS);
@@ -235,7 +339,6 @@ public class MainWindow {
         editorPane = new HBox(16, center, settings);
         editorPane.setPadding(new Insets(24, 28, 28, 28));
         HBox.setHgrow(center, Priority.ALWAYS);
-        root.setCenter(dropPane);
     }
 
     private Label formatChip(String text) {
@@ -263,15 +366,13 @@ public class MainWindow {
         return box;
     }
 
-    private void showDropScreen() {
-        root.setCenter(dropPane);
-    }
-
-    private void showEditorScreen() {
-        root.setCenter(editorPane);
-        editorPane.setVisible(true);
-        updateNavigation();
-        updatePreviewSizes();
+    private void updatePreviewSizes() {
+        double width = 390 * zoom;
+        double height = 390 * zoom;
+        originalView.setFitWidth(width);
+        originalView.setFitHeight(height);
+        resultView.setMinSize(width, height);
+        resultView.setPrefSize(width, height);
     }
 
     private void setDropHandlers(Region target) {
@@ -282,216 +383,12 @@ public class MainWindow {
         });
         target.setOnDragDropped(event -> {
             boolean success = false;
-            try {
-                if (event.getDragboard().hasFiles()) {
-                    loadFiles(event.getDragboard().getFiles());
-                    success = true;
-                }
-            } catch (Exception ex) {
-                showError("Could not load dropped files", ex);
+            if (event.getDragboard().hasFiles() && onFilesDropped != null) {
+                onFilesDropped.accept(event.getDragboard().getFiles());
+                success = true;
             }
             event.setDropCompleted(success);
             event.consume();
         });
-    }
-
-    private void chooseFiles() {
-        FileChooser chooser = new FileChooser();
-        chooser.setTitle("Select images or ZIP archives");
-        chooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("Images and ZIP", "*.jpg", "*.jpeg", "*.png", "*.zip"));
-        List<File> selected = chooser.showOpenMultipleDialog(stage);
-        if (selected != null) loadFiles(selected);
-    }
-
-    private void loadFiles(List<File> files) {
-        List<ImageItem> loaded = new ArrayList<>();
-        try {
-            for (File file : files) {
-                String name = file.getName().toLowerCase(Locale.ROOT);
-                if (name.endsWith(".zip")) {
-                    loaded.addAll(readZip(file));
-                } else if (isImage(file.getName())) {
-                    Image image = new Image(file.toURI().toString(), false);
-                    if (image.isError() || image.getWidth() < 1) throw new IOException("Unsupported or corrupted image: " + file.getName());
-                    loaded.add(new ImageItem(file.getName(), file, image));
-                }
-            }
-            if (loaded.isEmpty()) {
-                showAlert("No supported JPG/PNG images found.");
-                return;
-            }
-            items.clear();
-            items.addAll(loaded);
-            currentIndex = 0;
-            zoom = 1;
-            showEditorScreen();
-            showCurrentImage();
-            statusLabel.setText("Loaded " + items.size() + " image(s).");
-        } catch (Exception ex) {
-            showError("Unable to import files", ex);
-        }
-    }
-
-    private List<ImageItem> readZip(File zipFile) throws IOException {
-        List<ImageItem> result = new ArrayList<>();
-        try (ZipInputStream zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(zipFile)))) {
-            ZipEntry entry;
-            while ((entry = zis.getNextEntry()) != null) {
-                if (!entry.isDirectory() && isImage(entry.getName())) {
-                    ByteArrayOutputStream out = new ByteArrayOutputStream();
-                    zis.transferTo(out);
-                    byte[] bytes = out.toByteArray();
-                    Image image = new Image(new ByteArrayInputStream(bytes));
-                    if (image.isError() || image.getWidth() < 1) throw new IOException("Corrupted image inside ZIP: " + entry.getName());
-                    result.add(new ImageItem(new File(entry.getName()).getName(), null, image));
-                }
-                zis.closeEntry();
-            }
-        }
-        return result;
-    }
-
-    private boolean isImage(String name) {
-        String lower = name.toLowerCase(Locale.ROOT);
-        return lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png");
-    }
-
-    private void showCurrentImage() {
-        if (items.isEmpty()) return;
-        ImageItem item = items.get(currentIndex);
-        originalView.setImage(item.getImage());
-        fileLabel.setText((currentIndex + 1) + " / " + items.size() + " — " + item.getName());
-        updateNavigation();
-        updatePreviewSizes();
-        updateResultPreview();
-    }
-
-    private void updatePreviewSizes() {
-        double width = 390 * zoom;
-        double height = 390 * zoom;
-        originalView.setFitWidth(width);
-        originalView.setFitHeight(height);
-        resultView.setMinSize(width, height);
-        resultView.setPrefSize(width, height);
-    }
-
-    private void updateResultPreview() {
-        if (items.isEmpty()) { resultView.getEngine().loadContent(""); return; }
-        try {
-            String svg = makeSvg();
-            String previewSvg = svg.replaceFirst("width=\"\\d+\" height=\"\\d+\"",
-                    "width=\"100%\" height=\"100%\"");
-            resultView.getEngine().loadContent(previewSvg, "image/svg+xml");
-            statusLabel.setText("Preview updated • " + detailBox.getValue() + " detail • " +
-                    ("Unlimited".equals(colorModeBox.getValue()) ? "Unlimited colors" : colorCountBox.getValue() + " colors") +
-                    (removeBackground.isSelected() ? " • background removal on" : ""));
-        } catch (Exception ex) {
-            statusLabel.setText("Preview unavailable: " + ex.getMessage());
-        }
-    }
-
-    private String makeSvg() {
-        ImageItem item = items.get(currentIndex);
-        int detail = switch (detailBox.getValue()) { case "Low" -> 0; case "High" -> 2; default -> 1; };
-        boolean unlimited = "Unlimited".equals(colorModeBox.getValue());
-        int colors = colorCountBox.getValue() == null ? 2 : colorCountBox.getValue();
-        return RasterToSvg.convert(item.getImage(), detail, colors, unlimited, removeBackground.isSelected());
-    }
-
-    private void navigate(int direction) {
-        if (items.isEmpty()) return;
-        currentIndex = Math.floorMod(currentIndex + direction, items.size());
-        showCurrentImage();
-    }
-
-    private void updateNavigation() {
-        backButton.setDisable(items.size() < 2);
-        nextButton.setDisable(items.size() < 2);
-        exportButton.setDisable(items.isEmpty());
-    }
-
-    private void exportAll() {
-        if (items.isEmpty()) return;
-        DirectoryChooser chooser = new DirectoryChooser();
-        chooser.setTitle("Choose output folder for SVG files");
-        File folder = chooser.showDialog(stage);
-        if (folder == null) return;
-
-        boolean parallel = items.size() > 1 && "Medium".equals(detailBox.getValue())
-                && "Custom".equals(colorModeBox.getValue());
-        progressBar.setVisible(true);
-        progressBar.setProgress(0);
-        exportButton.setDisable(true);
-        statusLabel.setText(parallel ? "Exporting files in parallel..." : "Exporting files...");
-        List<ImageItem> work = new ArrayList<>(items);
-        int detail = switch (detailBox.getValue()) { case "Low" -> 0; case "High" -> 2; default -> 1; };
-        int colors = colorCountBox.getValue() == null ? 2 : colorCountBox.getValue();
-        boolean unlimited = "Unlimited".equals(colorModeBox.getValue());
-        boolean transparent = removeBackground.isSelected();
-
-        Task<Void> task = new Task<>() {
-            @Override protected Void call() throws Exception {
-                ExecutorService pool = parallel ? Executors.newFixedThreadPool(Math.min(work.size(), Runtime.getRuntime().availableProcessors()))
-                                                : Executors.newSingleThreadExecutor();
-                try {
-                    List<Future<?>> futures = new ArrayList<>();
-                    for (int i = 0; i < work.size(); i++) {
-                        final int index = i;
-                        futures.add(pool.submit(() -> {
-                            ImageItem item = work.get(index);
-                            String svg = RasterToSvg.convert(item.getImage(), detail, colors, unlimited, transparent);
-                            String base = item.getName().replaceFirst("(?i)\\.(jpg|jpeg|png)$", "");
-                            File out = new File(folder, base + ".svg");
-                            Files.writeString(out.toPath(), svg, StandardCharsets.UTF_8);
-                            return null;
-                        }));
-                    }
-                    for (int i = 0; i < futures.size(); i++) {
-                        futures.get(i).get();
-                        updateProgress(i + 1, futures.size());
-                        updateMessage("Exported " + (i + 1) + " / " + futures.size());
-                    }
-                } finally {
-                    pool.shutdown();
-                }
-                return null;
-            }
-        };
-        progressBar.progressProperty().bind(task.progressProperty());
-        statusLabel.textProperty().bind(task.messageProperty());
-        task.setOnSucceeded(e -> {
-            progressBar.progressProperty().unbind();
-            statusLabel.textProperty().unbind();
-            progressBar.setVisible(false);
-            exportButton.setDisable(false);
-            statusLabel.setText("Export complete. Saved " + work.size() + " SVG file(s) to " + folder.getAbsolutePath());
-            showAlert("Export complete! Saved " + work.size() + " SVG file(s).");
-        });
-        task.setOnFailed(e -> {
-            progressBar.progressProperty().unbind();
-            statusLabel.textProperty().unbind();
-            progressBar.setVisible(false);
-            exportButton.setDisable(false);
-            showError("Export failed", task.getException());
-        });
-        Thread thread = new Thread(task, "svg-export-worker");
-        thread.setDaemon(true);
-        thread.start();
-    }
-
-    private void showAlert(String message) {
-        Alert alert = new Alert(Alert.AlertType.INFORMATION, message, ButtonType.OK);
-        alert.initOwner(stage);
-        alert.setHeaderText(null);
-        alert.showAndWait();
-    }
-
-    private void showError(String title, Throwable ex) {
-        String message = ex == null ? "Unknown error" : ex.getMessage();
-        Alert alert = new Alert(Alert.AlertType.ERROR, message == null ? "Unknown error" : message, ButtonType.OK);
-        alert.initOwner(stage);
-        alert.setTitle(title);
-        alert.setHeaderText(title);
-        alert.showAndWait();
     }
 }

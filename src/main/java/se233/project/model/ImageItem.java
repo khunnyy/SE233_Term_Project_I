@@ -1,4 +1,4 @@
-package se233.project;
+package se233.project.model;
 
 import javafx.scene.image.Image;
 
